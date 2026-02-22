@@ -1,4 +1,21 @@
 {
+  "enable_id_whitelist": {
+    "description": "是否启用会话 ID 白名单（启用后仅白名单内的会话可触发解析）",
+    "type": "bool",
+    "default": false
+  },
+  "id_whitelist": {
+    "description": "会话 ID 白名单列表（unified_msg_origin 格式，如 aiocqhttp:GroupMessage:547540978）。可通过 /sid 命令获取。",
+    "hint": "填写允许触发抖音解析的会话 ID，格式参考日志或 /sid 命令输出。",
+    "type": "list",
+    "default": []
+  },
+  "whitelist_reply": {
+    "description": "非白名单会话触发时的回复内容（留空则不回复，静默忽略）",
+    "hint": "例如：当前会话未授权使用抖音解析功能。",
+    "type": "string",
+    "default": ""
+  },
   "group_whitelist": {
     "description": "群白名单（群 ID 列表）。为空则所有群都生效。",
     "hint": "填写允许解析抖音链接的群 ID，留空表示不限制。",

@@ -18,6 +18,17 @@ class DouyinPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=-1)
     async def on_message(self, event: AstrMessageEvent):
+        # 会话 ID 白名单检查（参考 AstrBot platform_settings.id_whitelist）
+        if self.config.get("enable_id_whitelist", False):
+            id_whitelist = self.config.get("id_whitelist", [])
+            umo = event.unified_msg_origin
+            if id_whitelist and umo not in id_whitelist:
+                logger.info(f"抖音解析插件：会话 {umo} 不在白名单中，已拦截")
+                reply = self.config.get("whitelist_reply", "")
+                if reply:
+                    yield event.plain_result(reply)
+                return
+
         # 群组白名单检查
         group_id = event.message_obj.group_id
         if group_id:
