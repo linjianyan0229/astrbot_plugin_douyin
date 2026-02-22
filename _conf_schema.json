@@ -1,0 +1,13 @@
+{
+  "group_whitelist": {
+    "description": "群白名单（群 ID 列表）。为空则所有群都生效。",
+    "hint": "填写允许解析抖音链接的群 ID，留空表示不限制。",
+    "type": "list",
+    "default": []
+  },
+  "enable_in_private": {
+    "description": "是否在私聊中启用解析",
+    "type": "bool",
+    "default": true
+  }
+}

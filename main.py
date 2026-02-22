@@ -1,6 +1,6 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
 import httpx
 import re
@@ -12,11 +12,23 @@ PARSE_API = "https://toody.netlify.app/.netlify/functions/parse"
 
 @register("astrbot_plugin_douyin", "linjianyan0229", "自动检测抖音分享链接，解析并发送无水印视频", "1.0.0")
 class DouyinPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=-1)
     async def on_message(self, event: AstrMessageEvent):
+        # 群组白名单检查
+        group_id = event.message_obj.group_id
+        if group_id:
+            whitelist = self.config.get("group_whitelist", [])
+            if whitelist and str(group_id) not in [str(g) for g in whitelist]:
+                return
+        else:
+            # 私聊消息
+            if not self.config.get("enable_in_private", True):
+                return
+
         text = event.message_str
         match = DOUYIN_URL_PATTERN.search(text)
         if not match:
