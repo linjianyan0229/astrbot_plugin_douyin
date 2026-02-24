@@ -26,5 +26,33 @@
     "description": "是否在私聊中启用解析",
     "type": "bool",
     "default": true
+  },
+  "weather_enable_id_whitelist": {
+    "description": "是否启用天气功能的会话 ID 白名单（启用后仅白名单内的会话可使用天气查询）",
+    "type": "bool",
+    "default": false
+  },
+  "weather_id_whitelist": {
+    "description": "天气功能的会话 ID 白名单列表（unified_msg_origin 格式）。可通过 /sid 命令获取。",
+    "hint": "填写允许使用天气查询的会话 ID。",
+    "type": "list",
+    "default": []
+  },
+  "weather_whitelist_reply": {
+    "description": "天气功能非白名单会话触发时的回复内容（留空则不回复，静默忽略）",
+    "hint": "例如：当前会话未授权使用天气查询功能。",
+    "type": "string",
+    "default": ""
+  },
+  "weather_group_whitelist": {
+    "description": "天气功能群白名单（群 ID 列表）。为空则所有群都生效。",
+    "hint": "填写允许使用天气查询的群 ID，留空表示不限制。",
+    "type": "list",
+    "default": []
+  },
+  "weather_enable_in_private": {
+    "description": "是否在私聊中启用天气查询",
+    "type": "bool",
+    "default": true
   }
 }
