@@ -22,6 +22,7 @@ from .model_status import (
     result_from_record,
 )
 from .ranking import RankingAPIError, fetch_users_ranking, render_users_ranking
+from .website_list import WebsiteProbeResult, format_website_list, probe_website
 
 
 DOUYIN_URL_PATTERN = re.compile(r"https?://v\.douyin\.com/[A-Za-z0-9_\-]+/?")
@@ -698,6 +699,38 @@ class DouyinPlugin(Star):
             yield event.plain_result("模型状态汇总图片生成失败。")
             return
         yield event.image_result(img_path)
+
+    @filter.command("网站列表")
+    async def query_website_list(self, event: AstrMessageEvent):
+        """显示配置网站的当前访问速度"""
+        websites = []
+        seen_urls = set()
+        groups = self.config.get("website_list_groups", [])
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                url = str(group.get("url") or "").strip()
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    websites.append(url)
+
+        if not websites:
+            yield event.plain_result("网站列表尚未配置。")
+            return
+
+        outcomes = await asyncio.gather(
+            *(probe_website(url) for url in websites),
+            return_exceptions=True,
+        )
+        results = []
+        for url, outcome in zip(websites, outcomes):
+            if isinstance(outcome, Exception):
+                logger.error(f"网站访问速度探测失败 ({url}): {outcome}")
+                results.append(WebsiteProbeResult(url, None, "访问失败"))
+                continue
+            results.append(outcome)
+        yield event.plain_result(format_website_list(results))
 
     @filter.command("查分组")
     async def query_billing_rates(self, event: AstrMessageEvent):

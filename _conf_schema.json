@@ -138,6 +138,27 @@
     "type": "int",
     "default": 60
   },
+  "website_list_groups": {
+    "description": "网站列表",
+    "hint": "配置“网站列表”指令需要展示和测速的网站。",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "website": {
+        "name": "网站",
+        "display_item": "url",
+        "hide_hint_in_list": true,
+        "items": {
+          "url": {
+            "description": "网站 URL",
+            "hint": "请填写包含 http:// 或 https:// 的完整网站地址。",
+            "type": "string",
+            "default": "https://example.com"
+          }
+        }
+      }
+    }
+  },
   "billing_rate_allowed_user_ids": {
     "description": "允许使用查分组指令的账号 ID",
     "hint": "填写平台发送者账号 ID；列表为空时任何账号都不能调用。",
