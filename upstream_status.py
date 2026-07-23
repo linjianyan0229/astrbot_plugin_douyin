@@ -16,7 +16,7 @@ _SHANGHAI_TZ = datetime.timezone(datetime.timedelta(hours=8))
 class UpstreamStatusResult:
     station_name: str
     balance: AccountBalanceResult
-    billing: BillingRateResult
+    billings: tuple[BillingRateResult, ...]
 
 
 def _get_font(size: int):
@@ -64,11 +64,15 @@ def render_upstream_status(
     margin = 44
     title_h = 130
     header_h = 58
-    row_h = 92
+    billing_row_h = 62
     footer_h = 58
     table_top = title_h
     body_top = table_top + header_h
-    height = body_top + len(results) * row_h + footer_h
+    row_heights = [
+        max(92, 20 + max(len(result.billings), 1) * billing_row_h)
+        for result in results
+    ]
+    height = body_top + sum(row_heights) + footer_h
 
     colors = {
         "bg": (244, 246, 248),
@@ -145,10 +149,19 @@ def render_upstream_status(
             anchor=anchor,
         )
 
-    for index, result in enumerate(results):
+    top = body_top
+    for index, (result, row_h) in enumerate(zip(results, row_heights)):
         balance = result.balance
-        billing = result.billing
-        top = body_top + index * row_h
+        billings = result.billings or (
+            BillingRateResult(
+                result.station_name,
+                None,
+                "failed",
+                None,
+                "倍率查询结果为空",
+                "",
+            ),
+        )
         center_y = top + row_h // 2
         if index:
             draw.line((x0 + 18, top, x6 - 18, top), fill=colors["line"], width=1)
@@ -156,10 +169,13 @@ def render_upstream_status(
             draw.rectangle((x0, top, x6, top + row_h), fill=(250, 251, 253))
 
         balance_ok = balance.success
-        billing_ok = billing.effective_rate_multiplier is not None
+        billing_ok = any(
+            billing.effective_rate_multiplier is not None for billing in billings
+        )
+        billing_degraded = any(billing.state == "degraded" for billing in billings)
         if balance_ok and billing_ok:
             accent = colors["green"]
-        elif balance_ok or billing_ok or billing.state == "degraded":
+        elif balance_ok or billing_ok or billing_degraded:
             accent = colors["yellow"]
         else:
             accent = colors["red"]
@@ -251,57 +267,71 @@ def render_upstream_status(
             draw.text((x2 + 20, center_y), "-", font=body_font, fill=colors["muted"], anchor="lm")
             draw.text((x4 - 20, center_y), "-", font=body_font, fill=colors["muted"], anchor="rm")
 
-        group_name = billing.group_name
-        if not group_name and billing.protocol == "sub2api":
-            group_name = "实时倍率"
-        if not group_name:
-            group_name = "未知"
-        group_name = _ellipsize(draw, group_name, body_font, x5 - x4 - 40)
-        draw.text(
-            (x4 + 20, center_y - 10),
-            group_name,
-            font=body_font,
-            fill=colors["ink"],
-            anchor="lm",
-        )
-        billing_detail = _ellipsize(
-            draw, billing.detail, detail_font, x5 - x4 - 40
-        )
-        draw.text(
-            (x4 + 20, center_y + 18),
-            billing_detail,
-            font=detail_font,
-            fill=colors["muted"],
-            anchor="lm",
-        )
+        billing_top = top + (row_h - len(billings) * billing_row_h) // 2
+        for billing_index, billing in enumerate(billings):
+            billing_center_y = (
+                billing_top + billing_index * billing_row_h + billing_row_h // 2
+            )
+            if billing_index:
+                separator_y = billing_top + billing_index * billing_row_h
+                draw.line(
+                    (x4 + 12, separator_y, x6 - 12, separator_y),
+                    fill=colors["line"],
+                    width=1,
+                )
 
-        rate_value = billing.effective_rate_multiplier
-        rate_color = (
-            colors["green"]
-            if billing.state == "healthy"
-            else colors["yellow"]
-            if billing.state == "degraded"
-            else colors["red"]
-        )
-        rate_text = _rate(rate_value) if rate_value is not None else "查询失败"
-        draw.text(
-            (x6 - 22, center_y - 10),
-            rate_text,
-            font=body_font,
-            fill=rate_color,
-            anchor="rm",
-        )
-        if billing.last_rate_multiplier is not None:
-            last_text = f"上次 {_rate(billing.last_rate_multiplier)}"
-        else:
-            last_text = "当前最终倍率" if rate_value is not None else "-"
-        draw.text(
-            (x6 - 22, center_y + 18),
-            last_text,
-            font=detail_font,
-            fill=colors["muted"],
-            anchor="rm",
-        )
+            group_name = billing.group_name
+            if not group_name:
+                group_name = f"Key {billing_index + 1}"
+            group_name = _ellipsize(
+                draw, group_name, body_font, x5 - x4 - 40
+            )
+            draw.text(
+                (x4 + 20, billing_center_y - 10),
+                group_name,
+                font=body_font,
+                fill=colors["ink"],
+                anchor="lm",
+            )
+            billing_detail = _ellipsize(
+                draw, billing.detail, detail_font, x5 - x4 - 40
+            )
+            draw.text(
+                (x4 + 20, billing_center_y + 18),
+                billing_detail,
+                font=detail_font,
+                fill=colors["muted"],
+                anchor="lm",
+            )
+
+            rate_value = billing.effective_rate_multiplier
+            rate_color = (
+                colors["green"]
+                if billing.state == "healthy"
+                else colors["yellow"]
+                if billing.state == "degraded"
+                else colors["red"]
+            )
+            rate_text = _rate(rate_value) if rate_value is not None else "查询失败"
+            draw.text(
+                (x6 - 22, billing_center_y - 10),
+                rate_text,
+                font=body_font,
+                fill=rate_color,
+                anchor="rm",
+            )
+            if billing.last_rate_multiplier is not None:
+                last_text = f"上次 {_rate(billing.last_rate_multiplier)}"
+            else:
+                last_text = "当前最终倍率" if rate_value is not None else "-"
+            draw.text(
+                (x6 - 22, billing_center_y + 18),
+                last_text,
+                font=detail_font,
+                fill=colors["muted"],
+                anchor="rm",
+            )
+        top += row_h
 
     checked_at = datetime.datetime.now(_SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
     draw.text(

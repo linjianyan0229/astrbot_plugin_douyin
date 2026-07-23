@@ -199,11 +199,11 @@
             "type": "string",
             "default": ""
           },
-          "billing_api_key": {
-            "description": "分组倍率 API Key（可选）",
-            "hint": "留空时复用余额查询凭据；New API/JBB 建议填写普通模型 API Key。",
-            "type": "string",
-            "default": ""
+          "billing_api_keys": {
+            "description": "分组倍率 API Key 列表（可选）",
+            "hint": "可添加多个 Key 并分别查询；列表为空时复用余额查询凭据。",
+            "type": "list",
+            "default": []
           }
         }
       }

@@ -789,21 +789,37 @@ class DouyinPlugin(Star):
                     group.get("balance_api_key") or ""
                 ).strip()
                 user_id = str(group.get("user_id") or "").strip()
-                billing_api_key = str(
-                    group.get("billing_api_key") or balance_api_key
+                raw_billing_keys = group.get("billing_api_keys", [])
+                if isinstance(raw_billing_keys, str):
+                    raw_billing_keys = re.split(r"[,，\n]", raw_billing_keys)
+                if not isinstance(raw_billing_keys, list):
+                    raw_billing_keys = []
+                legacy_billing_key = str(
+                    group.get("billing_api_key") or ""
                 ).strip()
+                billing_api_keys = []
+                seen_billing_keys = set()
+                for raw_key in raw_billing_keys:
+                    billing_key = str(raw_key or "").strip()
+                    if billing_key and billing_key not in seen_billing_keys:
+                        seen_billing_keys.add(billing_key)
+                        billing_api_keys.append(billing_key)
+                if not billing_api_keys and legacy_billing_key:
+                    billing_api_keys.append(legacy_billing_key)
+                if not billing_api_keys and balance_api_key:
+                    billing_api_keys.append(balance_api_key)
                 target = (
                     station_name,
                     api_url,
                     balance_api_key,
                     user_id,
-                    billing_api_key,
+                    tuple(billing_api_keys),
                 )
                 if (
                     station_name
                     and api_url
                     and balance_api_key
-                    and billing_api_key
+                    and billing_api_keys
                     and target not in seen_targets
                 ):
                     seen_targets.add(target)
@@ -824,10 +840,13 @@ class DouyinPlugin(Star):
                             user_id,
                             client=client,
                         ),
-                        probe_billing_rate(
-                            station_name,
-                            api_url,
-                            billing_api_key,
+                        *(
+                            probe_billing_rate(
+                                station_name,
+                                api_url,
+                                billing_api_key,
+                            )
+                            for billing_api_key in billing_api_keys
                         ),
                         return_exceptions=True,
                     )
@@ -836,7 +855,7 @@ class DouyinPlugin(Star):
                         api_url,
                         balance_api_key,
                         user_id,
-                        billing_api_key,
+                        billing_api_keys,
                     ) in targets
                 ),
                 return_exceptions=True,
@@ -849,11 +868,14 @@ class DouyinPlugin(Star):
                 balance_result = AccountBalanceResult(
                     target[0], False, detail="余额查询异常"
                 )
-                billing_result = BillingRateResult(
-                    target[0], None, "failed", None, "倍率查询异常", ""
+                billing_results = tuple(
+                    BillingRateResult(
+                        target[0], None, "failed", None, "倍率查询异常", ""
+                    )
+                    for _ in target[4]
                 )
             else:
-                balance_outcome, billing_outcome = outcome
+                balance_outcome, *billing_outcomes = outcome
                 if isinstance(balance_outcome, Exception):
                     logger.error(
                         f"余额查询失败 ({target[0]}): {balance_outcome}"
@@ -863,17 +885,27 @@ class DouyinPlugin(Star):
                     )
                 else:
                     balance_result = balance_outcome
-                if isinstance(billing_outcome, Exception):
-                    logger.error(
-                        f"倍率查询失败 ({target[0]}): {billing_outcome}"
-                    )
-                    billing_result = BillingRateResult(
-                        target[0], None, "failed", None, "倍率查询异常", ""
-                    )
-                else:
-                    billing_result = billing_outcome
+                billing_results_list = []
+                for billing_outcome in billing_outcomes:
+                    if isinstance(billing_outcome, Exception):
+                        logger.error(
+                            f"倍率查询失败 ({target[0]}): {billing_outcome}"
+                        )
+                        billing_results_list.append(
+                            BillingRateResult(
+                                target[0],
+                                None,
+                                "failed",
+                                None,
+                                "倍率查询异常",
+                                "",
+                            )
+                        )
+                    else:
+                        billing_results_list.append(billing_outcome)
+                billing_results = tuple(billing_results_list)
             results.append(
-                UpstreamStatusResult(target[0], balance_result, billing_result)
+                UpstreamStatusResult(target[0], balance_result, billing_results)
             )
 
         image_path = self._data_dir / "upstream_status.png"
