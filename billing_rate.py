@@ -1,4 +1,5 @@
 import datetime
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -19,6 +20,9 @@ class BillingRateResult:
     http_status: int | None
     detail: str
     observed_at: str
+    group_name: str | None = None
+    last_rate_multiplier: float | None = None
+    protocol: str = "sub2api"
 
 
 def _get_font(size: int):
@@ -42,22 +46,158 @@ def _ellipsize(draw, text: str, font, max_width: int) -> str:
     return text + suffix
 
 
-def normalize_billing_url(api_url: str) -> str:
-    """将站点地址、v1 地址或完整地址统一为 billing URL。"""
+def _build_site_api_url(api_url: str, endpoint_path: str) -> str:
     parts = urlsplit(api_url.strip())
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         raise ValueError("计费 API URL 格式无效")
 
     path = parts.path.rstrip("/")
-    if path.endswith("/v1/sub2api/billing"):
-        endpoint_path = path
-    elif path.endswith("/v1/chat/completions"):
-        endpoint_path = f"{path[:-len('/chat/completions')]}/sub2api/billing"
-    elif path.endswith("/v1"):
-        endpoint_path = f"{path}/sub2api/billing"
-    else:
-        endpoint_path = f"{path}/v1/sub2api/billing"
-    return urlunsplit((parts.scheme, parts.netloc, endpoint_path, parts.query, ""))
+    known_suffixes = (
+        "/v1/sub2api/billing",
+        "/v1/chat/completions",
+        "/api/usage/token",
+        "/api/log/token",
+        "/api/pricing",
+        "/v1",
+    )
+    for suffix in known_suffixes:
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    full_path = f"{path}{endpoint_path}"
+    return urlunsplit((parts.scheme, parts.netloc, full_path, parts.query, ""))
+
+
+def normalize_billing_url(api_url: str) -> str:
+    """将站点地址、v1 地址或完整地址统一为 Sub2API billing URL。"""
+    return _build_site_api_url(api_url, "/v1/sub2api/billing")
+
+
+def _http_error_detail(status_code: int) -> str:
+    details = {
+        401: "API Key 无效或未提供",
+        403: "API Key 无权查询",
+        404: "站点不支持倍率查询",
+        429: "查询请求被限流",
+    }
+    return details.get(status_code, f"接口返回 HTTP {status_code}")
+
+
+def _to_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _probe_jbb_rate(
+    client: httpx.AsyncClient,
+    station_name: str,
+    api_url: str,
+    api_key: str,
+    observed_at: str,
+) -> BillingRateResult:
+    log_url = _build_site_api_url(api_url, "/api/log/token")
+    pricing_url = _build_site_api_url(api_url, "/api/pricing")
+    log_response = await client.get(
+        log_url,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    if not 200 <= log_response.status_code < 300:
+        return BillingRateResult(
+            station_name,
+            None,
+            "failed",
+            log_response.status_code,
+            _http_error_detail(log_response.status_code),
+            observed_at,
+            protocol="jbb",
+        )
+
+    try:
+        log_payload = log_response.json()
+        logs = log_payload.get("data", [])
+    except (AttributeError, ValueError):
+        return BillingRateResult(
+            station_name,
+            None,
+            "failed",
+            log_response.status_code,
+            "历史记录响应格式异常",
+            observed_at,
+            protocol="jbb",
+        )
+
+    if not isinstance(logs, list) or not logs or not isinstance(logs[0], dict):
+        return BillingRateResult(
+            station_name,
+            None,
+            "degraded",
+            log_response.status_code,
+            "暂无历史记录，无法确定所属分组",
+            observed_at,
+            protocol="jbb",
+        )
+
+    latest_log = logs[0]
+    group_name = str(latest_log.get("group") or "").strip()
+    other = latest_log.get("other", {})
+    if isinstance(other, str):
+        try:
+            other = json.loads(other)
+        except ValueError:
+            other = {}
+    if not isinstance(other, dict):
+        other = {}
+    last_rate = _to_float(other.get("group_ratio"))
+    if not group_name:
+        return BillingRateResult(
+            station_name,
+            None,
+            "degraded",
+            log_response.status_code,
+            "最近记录中缺少所属分组",
+            observed_at,
+            last_rate_multiplier=last_rate,
+            protocol="jbb",
+        )
+
+    pricing_response = await client.get(pricing_url)
+    if not 200 <= pricing_response.status_code < 300:
+        return BillingRateResult(
+            station_name,
+            None,
+            "degraded",
+            pricing_response.status_code,
+            "已获取历史分组，但公开定价查询失败",
+            observed_at,
+            group_name=group_name,
+            last_rate_multiplier=last_rate,
+            protocol="jbb",
+        )
+
+    try:
+        pricing_payload = pricing_response.json()
+        group_ratios = pricing_payload.get("group_ratio", {})
+        if not group_ratios and isinstance(pricing_payload.get("data"), dict):
+            group_ratios = pricing_payload["data"].get("group_ratio", {})
+        current_rate = _to_float(group_ratios.get(group_name))
+    except (AttributeError, ValueError):
+        current_rate = None
+
+    state = "healthy" if current_rate is not None else "degraded"
+    detail = "公开倍率获取成功" if current_rate is not None else "公开定价中未找到该分组"
+    return BillingRateResult(
+        station_name,
+        current_rate,
+        state,
+        pricing_response.status_code,
+        detail,
+        observed_at,
+        group_name=group_name,
+        last_rate_multiplier=last_rate,
+        protocol="jbb",
+    )
 
 
 async def probe_billing_rate(
@@ -80,6 +220,14 @@ async def probe_billing_rate(
                 endpoint,
                 headers={"Authorization": f"Bearer {api_key}"},
             )
+            content_type = response.headers.get("content-type", "").lower()
+            should_try_jbb = response.status_code in {404, 405} or (
+                response.status_code == 403 and "application/json" not in content_type
+            )
+            if should_try_jbb:
+                return await _probe_jbb_rate(
+                    client, station_name, api_url, api_key, observed_at
+                )
     except httpx.TimeoutException:
         return BillingRateResult(
             station_name, None, "failed", None, "请求超时", observed_at
@@ -90,18 +238,12 @@ async def probe_billing_rate(
         )
 
     if not 200 <= response.status_code < 300:
-        details = {
-            401: "API Key 无效或未提供",
-            403: "API Key 无权查询",
-            404: "站点不支持倍率查询",
-            429: "查询请求被限流",
-        }
         return BillingRateResult(
             station_name,
             None,
             "failed",
             response.status_code,
-            details.get(response.status_code, f"接口返回 HTTP {response.status_code}"),
+            _http_error_detail(response.status_code),
             observed_at,
         )
 
@@ -109,13 +251,17 @@ async def probe_billing_rate(
         payload = response.json()
         multiplier = float(payload["effective_rate_multiplier"])
     except (KeyError, TypeError, ValueError):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                return await _probe_jbb_rate(
+                    client, station_name, api_url, api_key, observed_at
+                )
+        except httpx.TimeoutException:
+            detail = "JBB 倍率查询超时"
+        except httpx.RequestError:
+            detail = "无法连接到 JBB 倍率接口"
         return BillingRateResult(
-            station_name,
-            None,
-            "failed",
-            response.status_code,
-            "响应中缺少最终计费倍率",
-            observed_at,
+            station_name, None, "failed", response.status_code, detail, observed_at
         )
 
     return BillingRateResult(
@@ -125,6 +271,9 @@ async def probe_billing_rate(
         response.status_code,
         "倍率获取成功",
         str(payload.get("observed_at") or observed_at),
+        group_name=str(payload.get("group_name") or payload.get("group") or "").strip()
+        or None,
+        protocol="sub2api",
     )
 
 
@@ -133,11 +282,11 @@ def _format_multiplier(value: float) -> str:
 
 
 def render_billing_rates(results: list[BillingRateResult], save_path: str):
-    """将多个中转站的最终计费倍率渲染为一张 PNG。"""
+    """将多个中转站的实时或历史计费倍率渲染为一张 PNG。"""
     width = 900
     margin = 40
     header_h = 138
-    row_h = 104
+    row_h = 132
     footer_h = 58
     height = margin * 2 + header_h + max(len(results), 1) * row_h + footer_h
     colors = {
@@ -148,6 +297,8 @@ def render_billing_rates(results: list[BillingRateResult], save_path: str):
         "line": (230, 234, 237),
         "green": (19, 164, 112),
         "green_bg": (224, 248, 239),
+        "yellow": (224, 157, 27),
+        "yellow_bg": (255, 244, 215),
         "red": (216, 70, 70),
         "red_bg": (255, 232, 232),
     }
@@ -165,7 +316,7 @@ def render_billing_rates(results: list[BillingRateResult], save_path: str):
     draw.text((margin, margin + 8), "中转站分组倍率", font=title_font, fill=colors["text"])
     draw.text(
         (margin, margin + 60),
-        "普通 API Key 实时查询 · 不产生 Token 消耗",
+        "兼容 Sub2API 与 New API/JBB · 不产生 Token 消耗",
         font=subtitle_font,
         fill=colors["muted"],
     )
@@ -186,73 +337,118 @@ def render_billing_rates(results: list[BillingRateResult], save_path: str):
     for index, result in enumerate(results):
         row_top = content_top + index * row_h
         row_bottom = row_top + row_h - 10
-        healthy = result.state == "healthy"
-        accent = colors["green"] if healthy else colors["red"]
-        badge_bg = colors["green_bg"] if healthy else colors["red_bg"]
+        state_colors = {
+            "healthy": (colors["green"], colors["green_bg"]),
+            "degraded": (colors["yellow"], colors["yellow_bg"]),
+            "failed": (colors["red"], colors["red_bg"]),
+        }
+        accent, badge_bg = state_colors.get(
+            result.state, (colors["red"], colors["red_bg"])
+        )
         draw.rounded_rectangle(
             [margin, row_top, width - margin, row_bottom],
             radius=8,
             fill=colors["surface"],
         )
         draw.rounded_rectangle(
-            [margin + 22, row_top + 25, margin + 64, row_top + 67],
+            [margin + 22, row_top + 39, margin + 64, row_top + 81],
             radius=12,
             fill=badge_bg,
         )
         dot = "●"
         dot_w = _text_width(draw, dot, status_font)
         draw.text(
-            (margin + 43 - dot_w // 2, row_top + 36),
+            (margin + 43 - dot_w // 2, row_top + 50),
             dot,
             font=status_font,
             fill=accent,
         )
 
-        station_name = _ellipsize(draw, result.station_name, name_font, 420)
+        station_name = _ellipsize(draw, result.station_name, name_font, 400)
         draw.text(
-            (margin + 82, row_top + 22),
+            (margin + 82, row_top + 17),
             station_name,
             font=name_font,
             fill=colors["text"],
         )
-        status_text = (
-            f"HTTP {result.http_status} · {result.detail}"
-            if result.http_status is not None
-            else result.detail
-        )
-        status_text = _ellipsize(draw, status_text, detail_font, 430)
+        if result.group_name:
+            group_text = f"所属分组：{result.group_name}"
+        elif result.protocol == "sub2api":
+            group_text = "Sub2API 实时最终倍率"
+        else:
+            group_text = "所属分组：未知"
+        group_text = _ellipsize(draw, group_text, rate_label_font, 410)
         draw.text(
-            (margin + 82, row_top + 57),
+            (margin + 82, row_top + 52),
+            group_text,
+            font=rate_label_font,
+            fill=colors["muted"],
+        )
+        status_text = result.detail
+        status_text = _ellipsize(draw, status_text, detail_font, 410)
+        draw.text(
+            (margin + 82, row_top + 85),
             status_text,
             font=detail_font,
-            fill=colors["muted"] if healthy else accent,
+            fill=colors["muted"] if result.state == "healthy" else accent,
         )
 
         if result.effective_rate_multiplier is not None:
             rate_text = f"{_format_multiplier(result.effective_rate_multiplier)}x"
             rate_w = _text_width(draw, rate_text, rate_font)
             draw.text(
-                (width - margin - 28 - rate_w, row_top + 17),
+                (width - margin - 28 - rate_w, row_top + 14),
                 rate_text,
                 font=rate_font,
                 fill=accent,
             )
-            label_text = "分组倍率"
+            label_text = (
+                "当前公开倍率" if result.protocol == "jbb" else "实时最终倍率"
+            )
             label_w = _text_width(draw, label_text, rate_label_font)
             draw.text(
-                (width - margin - 28 - label_w, row_top + 59),
+                (width - margin - 28 - label_w, row_top + 55),
+                label_text,
+                font=rate_label_font,
+                fill=colors["muted"],
+            )
+        elif result.last_rate_multiplier is not None:
+            unknown_text = "--"
+            unknown_w = _text_width(draw, unknown_text, rate_font)
+            draw.text(
+                (width - margin - 28 - unknown_w, row_top + 14),
+                unknown_text,
+                font=rate_font,
+                fill=accent,
+            )
+            label_text = "当前公开倍率"
+            label_w = _text_width(draw, label_text, rate_label_font)
+            draw.text(
+                (width - margin - 28 - label_w, row_top + 55),
                 label_text,
                 font=rate_label_font,
                 fill=colors["muted"],
             )
         else:
-            failed_text = "查询失败"
+            failed_text = "无法确定" if result.state == "degraded" else "查询失败"
             failed_w = _text_width(draw, failed_text, rate_label_font)
             draw.text(
-                (width - margin - 28 - failed_w, row_top + 39),
+                (width - margin - 28 - failed_w, row_top + 42),
                 failed_text,
                 font=rate_label_font,
                 fill=accent,
+            )
+
+        if result.last_rate_multiplier is not None:
+            last_text = (
+                f"上次结算 {_format_multiplier(result.last_rate_multiplier)}x"
+            )
+            last_w = _text_width(draw, last_text, rate_label_font)
+            draw.text(
+                (width - margin - 28 - last_w, row_top + 88),
+                last_text,
+                font=rate_label_font,
+                fill=colors["muted"],
             )
 
     checked_at = datetime.datetime.now(_SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
