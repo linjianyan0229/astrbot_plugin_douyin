@@ -137,5 +137,43 @@
     "hint": "最小 30 秒，刷新会产生一次极小的模型调用。",
     "type": "int",
     "default": 60
+  },
+  "billing_rate_allowed_user_ids": {
+    "description": "允许使用查分组指令的账号 ID",
+    "hint": "填写平台发送者账号 ID；列表为空时任何账号都不能调用。",
+    "type": "list",
+    "default": []
+  },
+  "billing_rate_groups": {
+    "description": "分组倍率查询站点",
+    "hint": "每个站点使用自己的普通模型 API Key 查询实际生效倍率。",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "billing_group": {
+        "name": "倍率查询站点",
+        "display_item": "station_name",
+        "hide_hint_in_list": true,
+        "items": {
+          "station_name": {
+            "description": "中转站名称",
+            "type": "string",
+            "default": ""
+          },
+          "api_url": {
+            "description": "中转站 URL",
+            "hint": "支持站点地址、/v1 地址或完整的 /v1/sub2api/billing 地址。",
+            "type": "string",
+            "default": "https://sulmate.cn"
+          },
+          "api_key": {
+            "description": "普通模型 API Key",
+            "hint": "只调用倍率查询接口，不会产生 Token 消耗。",
+            "type": "string",
+            "default": ""
+          }
+        }
+      }
+    }
   }
 }

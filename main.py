@@ -11,6 +11,7 @@ from pypinyin import lazy_pinyin
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
+from .billing_rate import probe_billing_rate, render_billing_rates
 from .model_status import (
     append_status_history,
     build_cache_key,
@@ -697,6 +698,70 @@ class DouyinPlugin(Star):
 
         if not rendered:
             yield event.plain_result("所有模型状态探测均失败，请检查模型组配置。")
+
+    @filter.command("查分组")
+    async def query_billing_rates(self, event: AstrMessageEvent):
+        """查询普通 API Key 当前生效的分组倍率"""
+        allowed_user_ids = {
+            str(user_id).strip()
+            for user_id in self.config.get("billing_rate_allowed_user_ids", [])
+            if str(user_id).strip()
+        }
+        sender_id = str(event.get_sender_id() or "").strip()
+        if not sender_id or sender_id not in allowed_user_ids:
+            yield event.plain_result("你没有权限使用查分组指令。")
+            return
+
+        targets = []
+        seen_targets = set()
+        groups = self.config.get("billing_rate_groups", [])
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                station_name = str(group.get("station_name") or "").strip()
+                api_url = str(group.get("api_url") or "").strip()
+                api_key = str(group.get("api_key") or "").strip()
+                target_key = (station_name, api_url, api_key)
+                if (
+                    station_name
+                    and api_url
+                    and api_key
+                    and target_key not in seen_targets
+                ):
+                    seen_targets.add(target_key)
+                    targets.append(target_key)
+
+        if not targets:
+            yield event.plain_result("分组倍率查询站点尚未配置。")
+            return
+
+        outcomes = await asyncio.gather(
+            *(
+                probe_billing_rate(station_name, api_url, api_key)
+                for station_name, api_url, api_key in targets
+            ),
+            return_exceptions=True,
+        )
+        results = []
+        for target, outcome in zip(targets, outcomes):
+            if isinstance(outcome, Exception):
+                logger.error(f"分组倍率查询失败 ({target[0]}): {outcome}")
+                continue
+            results.append(outcome)
+
+        if not results:
+            yield event.plain_result("所有中转站的分组倍率查询均失败。")
+            return
+
+        img_path = str(self._data_dir / "billing_rates.png")
+        try:
+            render_billing_rates(results, img_path)
+        except Exception as e:
+            logger.error(f"分组倍率图片生成失败: {e}")
+            yield event.plain_result("分组倍率图片生成失败。")
+            return
+        yield event.image_result(img_path)
 
     async def terminate(self):
         if self._model_status_task:
