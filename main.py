@@ -18,7 +18,7 @@ from .model_status import (
     history_age_seconds,
     load_status_history,
     probe_model_status,
-    render_model_status,
+    render_model_status_dashboard,
     result_from_record,
 )
 from .ranking import RankingAPIError, fetch_users_ranking, render_users_ranking
@@ -675,7 +675,7 @@ class DouyinPlugin(Star):
             return_exceptions=True,
         )
 
-        rendered = 0
+        cards = []
         for target, outcome in zip(targets, outcomes):
             if isinstance(outcome, Exception):
                 logger.error(
@@ -684,20 +684,20 @@ class DouyinPlugin(Star):
                 )
                 continue
             result, history = outcome
-            img_path = str(self._data_dir / f"model_status_{result.cache_key}.png")
-            try:
-                render_model_status(result, history, refresh_interval, img_path)
-            except Exception as e:
-                logger.error(
-                    f"模型状态图片生成失败 ({target['station_name']}/"
-                    f"{target['model']}): {e}"
-                )
-                continue
-            rendered += 1
-            yield event.image_result(img_path)
+            cards.append((result, history))
 
-        if not rendered:
+        if not cards:
             yield event.plain_result("所有模型状态探测均失败，请检查模型组配置。")
+            return
+
+        img_path = str(self._data_dir / "model_status_dashboard.png")
+        try:
+            render_model_status_dashboard(cards, refresh_interval, img_path)
+        except Exception as e:
+            logger.error(f"模型状态汇总图片生成失败: {e}")
+            yield event.plain_result("模型状态汇总图片生成失败。")
+            return
+        yield event.image_result(img_path)
 
     @filter.command("查分组")
     async def query_billing_rates(self, event: AstrMessageEvent):

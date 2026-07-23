@@ -305,12 +305,11 @@ def history_age_seconds(history: list[dict]) -> float | None:
     )
 
 
-def render_model_status(
+def _build_model_status_image(
     result: ModelStatusResult,
     history: list[dict],
     refresh_interval: int,
-    save_path: str,
-):
+) -> Image.Image:
     """将当前状态和缓存历史渲染为监控卡片。"""
     width, height = 760, 720
     colors = {
@@ -454,4 +453,46 @@ def render_model_status(
         font=detail_font,
         fill=colors["muted"],
     )
+    return image
+
+
+def render_model_status(
+    result: ModelStatusResult,
+    history: list[dict],
+    refresh_interval: int,
+    save_path: str,
+):
+    image = _build_model_status_image(result, history, refresh_interval)
     image.save(save_path, "PNG")
+
+
+def render_model_status_dashboard(
+    cards: list[tuple[ModelStatusResult, list[dict]]],
+    refresh_interval: int,
+    save_path: str,
+):
+    """将多个模型状态卡按每行最多三个合并为一张图片。"""
+    if not cards:
+        raise ValueError("没有可渲染的模型状态卡")
+    if len(cards) == 1:
+        render_model_status(cards[0][0], cards[0][1], refresh_interval, save_path)
+        return
+
+    columns = min(3, len(cards))
+    rows = (len(cards) + columns - 1) // columns
+    cell_width, cell_height = 600, 568
+    gap, padding = 18, 18
+    width = padding * 2 + columns * cell_width + (columns - 1) * gap
+    height = padding * 2 + rows * cell_height + (rows - 1) * gap
+    dashboard = Image.new("RGB", (width, height), (235, 239, 242))
+    resampling = getattr(Image, "Resampling", Image).LANCZOS
+
+    for index, (result, history) in enumerate(cards):
+        card = _build_model_status_image(result, history, refresh_interval)
+        card = card.resize((cell_width, cell_height), resampling)
+        row, column = divmod(index, columns)
+        x = padding + column * (cell_width + gap)
+        y = padding + row * (cell_height + gap)
+        dashboard.paste(card, (x, y))
+
+    dashboard.save(save_path, "PNG")
