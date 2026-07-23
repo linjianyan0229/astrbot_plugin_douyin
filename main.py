@@ -280,17 +280,61 @@ class DouyinPlugin(Star):
         except ImportError:
             self._data_dir = Path("data") / "plugin_data" / "astrbot_plugin_douyin"
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._model_status_lock = asyncio.Lock()
+        self._model_status_locks = {}
+        self._model_status_cache_lock = asyncio.Lock()
+        self._model_status_probe_semaphore = asyncio.Semaphore(3)
         self._model_status_task = None
         self._ensure_model_status_monitor()
 
     def _model_status_settings(self):
-        station_name = str(
-            self.config.get("model_status_station_name", "全球最稳中转站") or ""
-        ).strip()
-        api_url = str(self.config.get("model_status_api_url", "") or "").strip()
-        model = str(self.config.get("model_status_model", "") or "").strip()
-        api_key = str(self.config.get("model_status_api_key", "") or "").strip()
+        targets = []
+        groups = self.config.get("model_status_groups", [])
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                station_name = str(group.get("station_name") or "").strip()
+                api_url = str(group.get("api_url") or "").strip()
+                api_key = str(group.get("api_key") or "").strip()
+                models = group.get("models", [])
+                if isinstance(models, str):
+                    models = re.split(r"[,，\n]", models)
+                if not isinstance(models, list):
+                    continue
+                seen_models = set()
+                for raw_model in models:
+                    model = str(raw_model or "").strip()
+                    if not model or model in seen_models:
+                        continue
+                    seen_models.add(model)
+                    if station_name and api_url and api_key:
+                        targets.append(
+                            {
+                                "station_name": station_name,
+                                "api_url": api_url,
+                                "api_key": api_key,
+                                "model": model,
+                            }
+                        )
+
+        if not targets:
+            station_name = str(
+                self.config.get("model_status_station_name", "全球最稳中转站")
+                or ""
+            ).strip()
+            api_url = str(self.config.get("model_status_api_url", "") or "").strip()
+            model = str(self.config.get("model_status_model", "") or "").strip()
+            api_key = str(self.config.get("model_status_api_key", "") or "").strip()
+            if station_name and api_url and model and api_key:
+                targets.append(
+                    {
+                        "station_name": station_name,
+                        "api_url": api_url,
+                        "api_key": api_key,
+                        "model": model,
+                    }
+                )
+
         try:
             refresh_interval = int(
                 self.config.get("model_status_refresh_interval", 60)
@@ -298,7 +342,7 @@ class DouyinPlugin(Star):
         except (TypeError, ValueError):
             refresh_interval = 60
         refresh_interval = max(30, min(refresh_interval, 3600))
-        return station_name, api_url, model, api_key, refresh_interval
+        return targets, refresh_interval
 
     @property
     def _model_status_cache_path(self):
@@ -313,37 +357,44 @@ class DouyinPlugin(Star):
             return
         self._model_status_task = loop.create_task(self._model_status_monitor())
 
-    async def _refresh_model_status(self):
-        station_name, api_url, model, api_key, interval = (
-            self._model_status_settings()
+    async def _refresh_model_status(self, target, interval):
+        station_name = target["station_name"]
+        api_url = target["api_url"]
+        api_key = target["api_key"]
+        model = target["model"]
+        cache_key = build_cache_key(station_name, api_url, model, api_key)
+        target_lock = self._model_status_locks.setdefault(
+            cache_key, asyncio.Lock()
         )
-        if not station_name or not api_url or not model or not api_key:
-            return None, []
-        async with self._model_status_lock:
-            cache_key = build_cache_key(station_name, api_url, model)
+        async with target_lock:
             history = load_status_history(self._model_status_cache_path, cache_key)
             age = history_age_seconds(history)
             if age is not None and age < interval:
                 return result_from_record(history[-1]), history
-            result = await probe_model_status(station_name, api_url, api_key, model)
-            history = append_status_history(self._model_status_cache_path, result)
+            async with self._model_status_probe_semaphore:
+                result = await probe_model_status(
+                    station_name, api_url, api_key, model
+                )
+            async with self._model_status_cache_lock:
+                history = append_status_history(self._model_status_cache_path, result)
             return result, history
 
     async def _model_status_monitor(self):
         while True:
             interval = 60
             try:
-                station_name, api_url, model, api_key, interval = (
-                    self._model_status_settings()
-                )
-                if station_name and api_url and model and api_key:
-                    cache_key = build_cache_key(station_name, api_url, model)
-                    history = load_status_history(
-                        self._model_status_cache_path, cache_key
+                targets, interval = self._model_status_settings()
+                if targets:
+                    outcomes = await asyncio.gather(
+                        *(
+                            self._refresh_model_status(target, interval)
+                            for target in targets
+                        ),
+                        return_exceptions=True,
                     )
-                    age = history_age_seconds(history)
-                    if age is None or age >= interval:
-                        await self._refresh_model_status()
+                    for outcome in outcomes:
+                        if isinstance(outcome, Exception):
+                            logger.error(f"模型状态后台刷新失败: {outcome}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -607,49 +658,45 @@ class DouyinPlugin(Star):
     @filter.command("模型状态")
     async def query_model_status(self, event: AstrMessageEvent):
         """显示模型接口缓存状态和近 7 天可用率"""
-        station_name, api_url, model, api_key, refresh_interval = (
-            self._model_status_settings()
-        )
-        if not station_name or not api_url or not model or not api_key:
+        targets, refresh_interval = self._model_status_settings()
+        if not targets:
             yield event.plain_result(
-                "模型状态的中转站名称、API URL、模型或 API Key 尚未配置。"
+                "模型状态组尚未配置，请填写中转站名称、URL、Key 和模型列表。"
             )
             return
 
-        try:
-            cache_key = build_cache_key(station_name, api_url, model)
-        except ValueError as e:
-            yield event.plain_result(str(e))
-            return
-
         self._ensure_model_status_monitor()
-        history = load_status_history(self._model_status_cache_path, cache_key)
-        age = history_age_seconds(history)
-        if age is None or age >= refresh_interval:
+        outcomes = await asyncio.gather(
+            *(
+                self._refresh_model_status(target, refresh_interval)
+                for target in targets
+            ),
+            return_exceptions=True,
+        )
+
+        rendered = 0
+        for target, outcome in zip(targets, outcomes):
+            if isinstance(outcome, Exception):
+                logger.error(
+                    f"模型状态刷新失败 ({target['station_name']}/{target['model']}): "
+                    f"{outcome}"
+                )
+                continue
+            result, history = outcome
+            img_path = str(self._data_dir / f"model_status_{result.cache_key}.png")
             try:
-                result, history = await self._refresh_model_status()
-            except ValueError as e:
-                yield event.plain_result(str(e))
-                return
+                render_model_status(result, history, refresh_interval, img_path)
             except Exception as e:
-                logger.error(f"模型状态缓存刷新失败: {e}")
-                yield event.plain_result("模型状态缓存刷新失败。")
-                return
-        else:
-            result = result_from_record(history[-1])
+                logger.error(
+                    f"模型状态图片生成失败 ({target['station_name']}/"
+                    f"{target['model']}): {e}"
+                )
+                continue
+            rendered += 1
+            yield event.image_result(img_path)
 
-        if result is None:
-            yield event.plain_result("模型状态配置不完整，无法执行检测。")
-            return
-
-        img_path = str(self._data_dir / "model_status.png")
-        try:
-            render_model_status(result, history, refresh_interval, img_path)
-        except Exception as e:
-            logger.error(f"模型状态图片生成失败: {e}")
-            yield event.plain_result("模型状态图片生成失败。")
-            return
-        yield event.image_result(img_path)
+        if not rendered:
+            yield event.plain_result("所有模型状态探测均失败，请检查模型组配置。")
 
     async def terminate(self):
         if self._model_status_task:

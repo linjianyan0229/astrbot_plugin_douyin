@@ -70,24 +70,67 @@
   "model_status_station_name": {
     "description": "模型状态中显示的中转站名称",
     "type": "string",
-    "default": "全球最稳中转站"
+    "default": "全球最稳中转站",
+    "invisible": true
   },
   "model_status_api_url": {
     "description": "模型 API URL",
     "hint": "支持填写主机地址、以 /v1 结尾的基础地址或完整的 /v1/chat/completions 地址。",
     "type": "string",
-    "default": "http://127.0.0.1:8080/v1"
+    "default": "http://127.0.0.1:8080/v1",
+    "invisible": true
   },
   "model_status_model": {
     "description": "状态检测使用的模型名称",
     "type": "string",
-    "default": "gpt-4.1"
+    "default": "gpt-4.1",
+    "invisible": true
   },
   "model_status_api_key": {
     "description": "调用模型 API 使用的 Key",
     "hint": "通过 Authorization: Bearer 请求头发送。",
     "type": "string",
-    "default": ""
+    "default": "",
+    "invisible": true
+  },
+  "model_status_groups": {
+    "description": "模型状态探测组",
+    "hint": "每组可配置独立的 URL、Key 和多个模型。",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "model_group": {
+        "name": "模型组",
+        "hint": "使用同一个 URL 和 Key 探测组内的所有模型。",
+        "display_item": "station_name",
+        "hide_hint_in_list": true,
+        "items": {
+          "station_name": {
+            "description": "中转站名称",
+            "type": "string",
+            "default": "全球最稳中转站"
+          },
+          "api_url": {
+            "description": "模型 API URL",
+            "hint": "支持主机地址、/v1 基础地址或完整的 /v1/chat/completions 地址。",
+            "type": "string",
+            "default": "http://127.0.0.1:8080/v1"
+          },
+          "api_key": {
+            "description": "模型 API Key",
+            "hint": "通过 Authorization: Bearer 请求头发送。",
+            "type": "string",
+            "default": ""
+          },
+          "models": {
+            "description": "模型列表",
+            "hint": "添加此 Key 可调用的一个或多个模型名称。",
+            "type": "list",
+            "default": []
+          }
+        }
+      }
+    }
   },
   "model_status_refresh_interval": {
     "description": "模型状态后台刷新间隔（秒）",

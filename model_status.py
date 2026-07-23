@@ -67,9 +67,14 @@ def normalize_chat_completions_url(api_url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, endpoint_path, parts.query, ""))
 
 
-def build_cache_key(station_name: str, api_url: str, model: str) -> str:
+def build_cache_key(
+    station_name: str,
+    api_url: str,
+    model: str,
+    api_key: str = "",
+) -> str:
     endpoint = normalize_chat_completions_url(api_url)
-    source = f"{station_name}\0{endpoint}\0{model}".encode("utf-8")
+    source = f"{station_name}\0{endpoint}\0{model}\0{api_key}".encode("utf-8")
     return hashlib.sha256(source).hexdigest()[:20]
 
 
@@ -112,7 +117,7 @@ async def probe_model_status(
 ) -> ModelStatusResult:
     """调用一次最小非流式对话请求并测量端到端响应时间。"""
     endpoint = normalize_chat_completions_url(api_url)
-    cache_key = build_cache_key(station_name, api_url, model)
+    cache_key = build_cache_key(station_name, api_url, model, api_key)
     checked_at = datetime.datetime.now(_SHANGHAI_TZ).isoformat(timespec="seconds")
     ping_task = asyncio.create_task(_measure_endpoint_ping(api_url))
     started = time.perf_counter()
