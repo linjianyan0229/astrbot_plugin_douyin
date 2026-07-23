@@ -11,7 +11,13 @@ from pypinyin import lazy_pinyin
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
+from .account_balance import (
+    AccountBalanceResult,
+    format_account_balances,
+    probe_account_balance,
+)
 from .billing_rate import probe_billing_rate, render_billing_rates
+from .codex_radar import CodexRadarError, fetch_codex_radar, render_codex_radar
 from .model_status import (
     append_status_history,
     build_cache_key,
@@ -286,6 +292,7 @@ class DouyinPlugin(Star):
         self._model_status_cache_lock = asyncio.Lock()
         self._model_status_probe_semaphore = asyncio.Semaphore(3)
         self._model_status_task = None
+        self._codex_radar_lock = asyncio.Lock()
         self._ensure_model_status_monitor()
 
     def _model_status_settings(self):
@@ -731,6 +738,88 @@ class DouyinPlugin(Star):
                 continue
             results.append(outcome)
         yield event.plain_result(format_website_list(results))
+
+    @filter.command("codex雷达")
+    async def query_codex_radar(self, event: AstrMessageEvent):
+        """显示 Codex Radar 智力效率排行"""
+        cache_path = self._data_dir / "codex_radar_cache.json"
+        image_path = self._data_dir / "codex_radar.png"
+        async with self._codex_radar_lock:
+            try:
+                snapshot = await fetch_codex_radar(cache_path)
+                render_codex_radar(
+                    snapshot.data,
+                    image_path,
+                    stale=snapshot.stale,
+                )
+            except CodexRadarError as exc:
+                logger.error(f"Codex 雷达数据获取失败: {exc}")
+                yield event.plain_result(f"Codex 雷达数据获取失败: {exc}")
+                return
+            except Exception as exc:
+                logger.error(f"Codex 雷达图片生成失败: {exc}")
+                yield event.plain_result("Codex 雷达图片生成失败。")
+                return
+        yield event.image_result(str(image_path))
+
+    @filter.command("余额")
+    async def query_account_balances(self, event: AstrMessageEvent):
+        """查询已配置中转站账号的余额和累计用量"""
+        allowed_user_ids = {
+            str(user_id).strip()
+            for user_id in self.config.get("balance_allowed_user_ids", [])
+            if str(user_id).strip()
+        }
+        sender_id = str(event.get_sender_id() or "").strip()
+        if not sender_id or sender_id not in allowed_user_ids:
+            yield event.plain_result("你没有权限使用余额指令。")
+            return
+
+        targets = []
+        seen_targets = set()
+        groups = self.config.get("balance_account_groups", [])
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                name = str(group.get("name") or "").strip()
+                api_url = str(group.get("api_url") or "").strip()
+                api_key = str(group.get("api_key") or "").strip()
+                user_id = str(group.get("user_id") or "").strip()
+                target = (name, api_url, api_key, user_id)
+                if all(target) and target not in seen_targets:
+                    seen_targets.add(target)
+                    targets.append(target)
+
+        if not targets:
+            yield event.plain_result("余额查询账号组尚未配置。")
+            return
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            outcomes = await asyncio.gather(
+                *(
+                    probe_account_balance(
+                        name,
+                        api_url,
+                        api_key,
+                        user_id,
+                        client=client,
+                    )
+                    for name, api_url, api_key, user_id in targets
+                ),
+                return_exceptions=True,
+            )
+
+        results = []
+        for target, outcome in zip(targets, outcomes):
+            if isinstance(outcome, Exception):
+                logger.error(f"余额查询失败 ({target[0]}): {outcome}")
+                results.append(
+                    AccountBalanceResult(target[0], False, detail="查询异常")
+                )
+                continue
+            results.append(outcome)
+        yield event.plain_result(format_account_balances(results))
 
     @filter.command("查分组")
     async def query_billing_rates(self, event: AstrMessageEvent):
