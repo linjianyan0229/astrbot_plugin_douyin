@@ -159,64 +159,20 @@
       }
     }
   },
-  "balance_allowed_user_ids": {
-    "description": "允许使用余额指令的账号 ID",
+  "upstream_allowed_user_ids": {
+    "description": "允许使用查上游指令的账号 ID",
     "hint": "填写平台发送者账号 ID；列表为空时任何账号都不能调用。",
     "type": "list",
     "default": []
   },
-  "balance_account_groups": {
-    "description": "余额查询账号组",
-    "hint": "配置中转站名称、URL、登录访问令牌和用户 ID。",
+  "upstream_groups": {
+    "description": "上游查询组",
+    "hint": "每组同时查询余额、累计消耗、请求次数和分组倍率。",
     "type": "template_list",
     "default": [],
     "templates": {
-      "balance_account": {
-        "name": "余额查询账号",
-        "display_item": "name",
-        "hide_hint_in_list": true,
-        "items": {
-          "name": {
-            "description": "中转站名称",
-            "type": "string",
-            "default": ""
-          },
-          "api_url": {
-            "description": "中转站 URL",
-            "hint": "支持站点地址、/v1 地址或完整的 /api/user/self 地址。",
-            "type": "string",
-            "default": "https://example.com"
-          },
-          "api_key": {
-            "description": "登录访问令牌",
-            "hint": "通过 Authorization 请求头发送，不是普通模型 API Key。",
-            "type": "string",
-            "default": ""
-          },
-          "user_id": {
-            "description": "用户 ID",
-            "hint": "通过 New-Api-User 请求头发送。",
-            "type": "string",
-            "default": ""
-          }
-        }
-      }
-    }
-  },
-  "billing_rate_allowed_user_ids": {
-    "description": "允许使用查分组指令的账号 ID",
-    "hint": "填写平台发送者账号 ID；列表为空时任何账号都不能调用。",
-    "type": "list",
-    "default": []
-  },
-  "billing_rate_groups": {
-    "description": "分组倍率查询站点",
-    "hint": "每个站点使用自己的普通模型 API Key 查询实际生效倍率。",
-    "type": "template_list",
-    "default": [],
-    "templates": {
-      "billing_group": {
-        "name": "倍率查询站点",
+      "upstream": {
+        "name": "上游",
         "display_item": "station_name",
         "hide_hint_in_list": true,
         "items": {
@@ -227,13 +183,25 @@
           },
           "api_url": {
             "description": "中转站 URL",
-            "hint": "支持站点地址、/v1 地址或完整的 /v1/sub2api/billing 地址。",
+            "hint": "支持站点地址、/v1、/v1/usage 或完整的 /api/user/self 地址。",
             "type": "string",
-            "default": "https://sulmate.cn"
+            "default": "https://example.com"
           },
-          "api_key": {
-            "description": "普通模型 API Key",
-            "hint": "只调用倍率查询接口，不会产生 Token 消耗。",
+          "balance_api_key": {
+            "description": "余额查询凭据",
+            "hint": "New API 填登录访问令牌；Sub2API 填普通模型 API Key。",
+            "type": "string",
+            "default": ""
+          },
+          "user_id": {
+            "description": "用户 ID（可选）",
+            "hint": "New API 必填；Sub2API 的 /v1/usage 查询可留空。",
+            "type": "string",
+            "default": ""
+          },
+          "billing_api_key": {
+            "description": "分组倍率 API Key（可选）",
+            "hint": "留空时复用余额查询凭据；New API/JBB 建议填写普通模型 API Key。",
             "type": "string",
             "default": ""
           }

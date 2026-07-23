@@ -13,10 +13,9 @@ from pathlib import Path
 
 from .account_balance import (
     AccountBalanceResult,
-    format_account_balances,
     probe_account_balance,
 )
-from .billing_rate import probe_billing_rate, render_billing_rates
+from .billing_rate import BillingRateResult, probe_billing_rate
 from .codex_radar import CodexRadarError, fetch_codex_radar, render_codex_radar
 from .model_status import (
     append_status_history,
@@ -28,6 +27,7 @@ from .model_status import (
     result_from_record,
 )
 from .ranking import RankingAPIError, fetch_users_ranking, render_users_ranking
+from .upstream_status import UpstreamStatusResult, render_upstream_status
 from .website_list import WebsiteProbeResult, format_website_list, probe_website
 
 
@@ -293,6 +293,7 @@ class DouyinPlugin(Star):
         self._model_status_probe_semaphore = asyncio.Semaphore(3)
         self._model_status_task = None
         self._codex_radar_lock = asyncio.Lock()
+        self._upstream_render_lock = asyncio.Lock()
         self._ensure_model_status_monitor()
 
     def _model_status_settings(self):
@@ -762,50 +763,81 @@ class DouyinPlugin(Star):
                 return
         yield event.image_result(str(image_path))
 
-    @filter.command("余额")
-    async def query_account_balances(self, event: AstrMessageEvent):
-        """查询已配置中转站账号的余额和累计用量"""
+    @filter.command("查上游")
+    async def query_upstream_status(self, event: AstrMessageEvent):
+        """查询已配置上游的余额、用量和分组倍率"""
         allowed_user_ids = {
             str(user_id).strip()
-            for user_id in self.config.get("balance_allowed_user_ids", [])
+            for user_id in self.config.get("upstream_allowed_user_ids", [])
             if str(user_id).strip()
         }
         sender_id = str(event.get_sender_id() or "").strip()
         if not sender_id or sender_id not in allowed_user_ids:
-            yield event.plain_result("你没有权限使用余额指令。")
+            yield event.plain_result("你没有权限使用查上游指令。")
             return
 
         targets = []
         seen_targets = set()
-        groups = self.config.get("balance_account_groups", [])
+        groups = self.config.get("upstream_groups", [])
         if isinstance(groups, list):
             for group in groups:
                 if not isinstance(group, dict):
                     continue
-                name = str(group.get("name") or "").strip()
+                station_name = str(group.get("station_name") or "").strip()
                 api_url = str(group.get("api_url") or "").strip()
-                api_key = str(group.get("api_key") or "").strip()
+                balance_api_key = str(
+                    group.get("balance_api_key") or ""
+                ).strip()
                 user_id = str(group.get("user_id") or "").strip()
-                target = (name, api_url, api_key, user_id)
-                if all(target) and target not in seen_targets:
+                billing_api_key = str(
+                    group.get("billing_api_key") or balance_api_key
+                ).strip()
+                target = (
+                    station_name,
+                    api_url,
+                    balance_api_key,
+                    user_id,
+                    billing_api_key,
+                )
+                if (
+                    station_name
+                    and api_url
+                    and balance_api_key
+                    and billing_api_key
+                    and target not in seen_targets
+                ):
                     seen_targets.add(target)
                     targets.append(target)
 
         if not targets:
-            yield event.plain_result("余额查询账号组尚未配置。")
+            yield event.plain_result("上游查询组尚未配置。")
             return
 
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             outcomes = await asyncio.gather(
                 *(
-                    probe_account_balance(
-                        name,
-                        api_url,
-                        api_key,
-                        user_id,
-                        client=client,
+                    asyncio.gather(
+                        probe_account_balance(
+                            station_name,
+                            api_url,
+                            balance_api_key,
+                            user_id,
+                            client=client,
+                        ),
+                        probe_billing_rate(
+                            station_name,
+                            api_url,
+                            billing_api_key,
+                        ),
+                        return_exceptions=True,
                     )
-                    for name, api_url, api_key, user_id in targets
+                    for (
+                        station_name,
+                        api_url,
+                        balance_api_key,
+                        user_id,
+                        billing_api_key,
+                    ) in targets
                 ),
                 return_exceptions=True,
             )
@@ -813,77 +845,46 @@ class DouyinPlugin(Star):
         results = []
         for target, outcome in zip(targets, outcomes):
             if isinstance(outcome, Exception):
-                logger.error(f"余额查询失败 ({target[0]}): {outcome}")
-                results.append(
-                    AccountBalanceResult(target[0], False, detail="查询异常")
+                logger.error(f"上游查询失败 ({target[0]}): {outcome}")
+                balance_result = AccountBalanceResult(
+                    target[0], False, detail="余额查询异常"
                 )
-                continue
-            results.append(outcome)
-        yield event.plain_result(format_account_balances(results))
+                billing_result = BillingRateResult(
+                    target[0], None, "failed", None, "倍率查询异常", ""
+                )
+            else:
+                balance_outcome, billing_outcome = outcome
+                if isinstance(balance_outcome, Exception):
+                    logger.error(
+                        f"余额查询失败 ({target[0]}): {balance_outcome}"
+                    )
+                    balance_result = AccountBalanceResult(
+                        target[0], False, detail="余额查询异常"
+                    )
+                else:
+                    balance_result = balance_outcome
+                if isinstance(billing_outcome, Exception):
+                    logger.error(
+                        f"倍率查询失败 ({target[0]}): {billing_outcome}"
+                    )
+                    billing_result = BillingRateResult(
+                        target[0], None, "failed", None, "倍率查询异常", ""
+                    )
+                else:
+                    billing_result = billing_outcome
+            results.append(
+                UpstreamStatusResult(target[0], balance_result, billing_result)
+            )
 
-    @filter.command("查分组")
-    async def query_billing_rates(self, event: AstrMessageEvent):
-        """查询普通 API Key 当前生效的分组倍率"""
-        allowed_user_ids = {
-            str(user_id).strip()
-            for user_id in self.config.get("billing_rate_allowed_user_ids", [])
-            if str(user_id).strip()
-        }
-        sender_id = str(event.get_sender_id() or "").strip()
-        if not sender_id or sender_id not in allowed_user_ids:
-            yield event.plain_result("你没有权限使用查分组指令。")
-            return
-
-        targets = []
-        seen_targets = set()
-        groups = self.config.get("billing_rate_groups", [])
-        if isinstance(groups, list):
-            for group in groups:
-                if not isinstance(group, dict):
-                    continue
-                station_name = str(group.get("station_name") or "").strip()
-                api_url = str(group.get("api_url") or "").strip()
-                api_key = str(group.get("api_key") or "").strip()
-                target_key = (station_name, api_url, api_key)
-                if (
-                    station_name
-                    and api_url
-                    and api_key
-                    and target_key not in seen_targets
-                ):
-                    seen_targets.add(target_key)
-                    targets.append(target_key)
-
-        if not targets:
-            yield event.plain_result("分组倍率查询站点尚未配置。")
-            return
-
-        outcomes = await asyncio.gather(
-            *(
-                probe_billing_rate(station_name, api_url, api_key)
-                for station_name, api_url, api_key in targets
-            ),
-            return_exceptions=True,
-        )
-        results = []
-        for target, outcome in zip(targets, outcomes):
-            if isinstance(outcome, Exception):
-                logger.error(f"分组倍率查询失败 ({target[0]}): {outcome}")
-                continue
-            results.append(outcome)
-
-        if not results:
-            yield event.plain_result("所有中转站的分组倍率查询均失败。")
-            return
-
-        img_path = str(self._data_dir / "billing_rates.png")
+        image_path = self._data_dir / "upstream_status.png"
         try:
-            render_billing_rates(results, img_path)
-        except Exception as e:
-            logger.error(f"分组倍率图片生成失败: {e}")
-            yield event.plain_result("分组倍率图片生成失败。")
+            async with self._upstream_render_lock:
+                render_upstream_status(results, image_path)
+        except Exception as exc:
+            logger.error(f"上游状态图片生成失败: {exc}")
+            yield event.plain_result("上游状态图片生成失败。")
             return
-        yield event.image_result(img_path)
+        yield event.image_result(str(image_path))
 
     async def terminate(self):
         if self._model_status_task:

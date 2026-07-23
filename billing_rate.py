@@ -55,6 +55,8 @@ def _build_site_api_url(api_url: str, endpoint_path: str) -> str:
     known_suffixes = (
         "/v1/sub2api/billing",
         "/v1/chat/completions",
+        "/v1/usage",
+        "/api/user/self",
         "/api/usage/token",
         "/api/log/token",
         "/api/pricing",
