@@ -66,5 +66,33 @@
     "hint": "请求消费排行 API 时通过 x-api-key 请求头发送。",
     "type": "string",
     "default": ""
+  },
+  "model_status_station_name": {
+    "description": "模型状态中显示的中转站名称",
+    "type": "string",
+    "default": "全球最稳中转站"
+  },
+  "model_status_api_url": {
+    "description": "模型 API URL",
+    "hint": "支持填写主机地址、以 /v1 结尾的基础地址或完整的 /v1/chat/completions 地址。",
+    "type": "string",
+    "default": "http://127.0.0.1:8080/v1"
+  },
+  "model_status_model": {
+    "description": "状态检测使用的模型名称",
+    "type": "string",
+    "default": "gpt-4.1"
+  },
+  "model_status_api_key": {
+    "description": "调用模型 API 使用的 Key",
+    "hint": "通过 Authorization: Bearer 请求头发送。",
+    "type": "string",
+    "default": ""
+  },
+  "model_status_refresh_interval": {
+    "description": "模型状态后台刷新间隔（秒）",
+    "hint": "最小 30 秒，刷新会产生一次极小的模型调用。",
+    "type": "int",
+    "default": 60
   }
 }

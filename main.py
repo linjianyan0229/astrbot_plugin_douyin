@@ -2,6 +2,8 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
+import asyncio
+import contextlib
 import httpx
 import re
 import datetime
@@ -9,6 +11,15 @@ from pypinyin import lazy_pinyin
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
+from .model_status import (
+    append_status_history,
+    build_cache_key,
+    history_age_seconds,
+    load_status_history,
+    probe_model_status,
+    render_model_status,
+    result_from_record,
+)
 from .ranking import RankingAPIError, fetch_users_ranking, render_users_ranking
 
 
@@ -269,6 +280,75 @@ class DouyinPlugin(Star):
         except ImportError:
             self._data_dir = Path("data") / "plugin_data" / "astrbot_plugin_douyin"
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._model_status_lock = asyncio.Lock()
+        self._model_status_task = None
+        self._ensure_model_status_monitor()
+
+    def _model_status_settings(self):
+        station_name = str(
+            self.config.get("model_status_station_name", "全球最稳中转站") or ""
+        ).strip()
+        api_url = str(self.config.get("model_status_api_url", "") or "").strip()
+        model = str(self.config.get("model_status_model", "") or "").strip()
+        api_key = str(self.config.get("model_status_api_key", "") or "").strip()
+        try:
+            refresh_interval = int(
+                self.config.get("model_status_refresh_interval", 60)
+            )
+        except (TypeError, ValueError):
+            refresh_interval = 60
+        refresh_interval = max(30, min(refresh_interval, 3600))
+        return station_name, api_url, model, api_key, refresh_interval
+
+    @property
+    def _model_status_cache_path(self):
+        return self._data_dir / "model_status_cache.json"
+
+    def _ensure_model_status_monitor(self):
+        if self._model_status_task and not self._model_status_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._model_status_task = loop.create_task(self._model_status_monitor())
+
+    async def _refresh_model_status(self):
+        station_name, api_url, model, api_key, interval = (
+            self._model_status_settings()
+        )
+        if not station_name or not api_url or not model or not api_key:
+            return None, []
+        async with self._model_status_lock:
+            cache_key = build_cache_key(station_name, api_url, model)
+            history = load_status_history(self._model_status_cache_path, cache_key)
+            age = history_age_seconds(history)
+            if age is not None and age < interval:
+                return result_from_record(history[-1]), history
+            result = await probe_model_status(station_name, api_url, api_key, model)
+            history = append_status_history(self._model_status_cache_path, result)
+            return result, history
+
+    async def _model_status_monitor(self):
+        while True:
+            interval = 60
+            try:
+                station_name, api_url, model, api_key, interval = (
+                    self._model_status_settings()
+                )
+                if station_name and api_url and model and api_key:
+                    cache_key = build_cache_key(station_name, api_url, model)
+                    history = load_status_history(
+                        self._model_status_cache_path, cache_key
+                    )
+                    age = history_age_seconds(history)
+                    if age is None or age >= interval:
+                        await self._refresh_model_status()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"模型状态后台刷新失败: {e}")
+            await asyncio.sleep(interval)
 
     def _check_whitelist(self, event: AstrMessageEvent, prefix: str = ""):
         """检查白名单权限。返回 None 表示放行，返回 "BLOCKED" 表示静默拦截，
@@ -524,5 +604,55 @@ class DouyinPlugin(Star):
             return
         yield event.image_result(img_path)
 
+    @filter.command("模型状态")
+    async def query_model_status(self, event: AstrMessageEvent):
+        """显示模型接口缓存状态和近 7 天可用率"""
+        station_name, api_url, model, api_key, refresh_interval = (
+            self._model_status_settings()
+        )
+        if not station_name or not api_url or not model or not api_key:
+            yield event.plain_result(
+                "模型状态的中转站名称、API URL、模型或 API Key 尚未配置。"
+            )
+            return
+
+        try:
+            cache_key = build_cache_key(station_name, api_url, model)
+        except ValueError as e:
+            yield event.plain_result(str(e))
+            return
+
+        self._ensure_model_status_monitor()
+        history = load_status_history(self._model_status_cache_path, cache_key)
+        age = history_age_seconds(history)
+        if age is None or age >= refresh_interval:
+            try:
+                result, history = await self._refresh_model_status()
+            except ValueError as e:
+                yield event.plain_result(str(e))
+                return
+            except Exception as e:
+                logger.error(f"模型状态缓存刷新失败: {e}")
+                yield event.plain_result("模型状态缓存刷新失败。")
+                return
+        else:
+            result = result_from_record(history[-1])
+
+        if result is None:
+            yield event.plain_result("模型状态配置不完整，无法执行检测。")
+            return
+
+        img_path = str(self._data_dir / "model_status.png")
+        try:
+            render_model_status(result, history, refresh_interval, img_path)
+        except Exception as e:
+            logger.error(f"模型状态图片生成失败: {e}")
+            yield event.plain_result("模型状态图片生成失败。")
+            return
+        yield event.image_result(img_path)
+
     async def terminate(self):
-        pass
+        if self._model_status_task:
+            self._model_status_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._model_status_task
