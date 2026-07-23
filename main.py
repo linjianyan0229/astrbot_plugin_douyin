@@ -9,6 +9,8 @@ from pypinyin import lazy_pinyin
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
+from .ranking import RankingAPIError, fetch_users_ranking, render_users_ranking
+
 
 DOUYIN_URL_PATTERN = re.compile(r"https?://v\.douyin\.com/[A-Za-z0-9_\-]+/?")
 PARSE_API = "https://toody.netlify.app/.netlify/functions/parse"
@@ -329,8 +331,9 @@ class DouyinPlugin(Star):
 
         if content_type == "视频" and video_url:
             info_text = f"作者: {author}\n{title}" if title else f"作者: {author}"
-            yield event.plain_result(info_text)
-            yield event.chain_result([Comp.Video.fromURL(video_url)])
+            yield event.chain_result(
+                [Comp.Plain(info_text), Comp.Video.fromURL(video_url)]
+            )
         elif content_type == "图集" and data.get("images"):
             info_text = f"作者: {author}\n{title}" if title else f"作者: {author}"
             yield event.plain_result(info_text)
@@ -494,6 +497,31 @@ class DouyinPlugin(Star):
 
         img_path = str(self._data_dir / "weather_forecast.png")
         _render_weather_forecast(card_data, img_path)
+        yield event.image_result(img_path)
+
+    @filter.command("排行榜")
+    async def query_users_ranking(self, event: AstrMessageEvent):
+        """查询管理员后台本周消费排行"""
+        api_url = self.config.get("ranking_api_url", "").strip()
+        api_key = self.config.get("ranking_api_key", "").strip()
+        if not api_url or not api_key:
+            yield event.plain_result("排行榜 API URL 或管理员 API Key 尚未配置。")
+            return
+
+        try:
+            data = await fetch_users_ranking(api_url, api_key)
+        except RankingAPIError as e:
+            logger.error(f"消费排行 API 请求失败: {e}")
+            yield event.plain_result(f"获取消费排行失败: {e}")
+            return
+
+        img_path = str(self._data_dir / "users_ranking.png")
+        try:
+            render_users_ranking(data, img_path)
+        except Exception as e:
+            logger.error(f"消费排行榜图片生成失败: {e}")
+            yield event.plain_result("消费排行榜图片生成失败。")
+            return
         yield event.image_result(img_path)
 
     async def terminate(self):

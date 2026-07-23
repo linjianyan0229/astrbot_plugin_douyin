@@ -54,5 +54,17 @@
     "description": "是否在私聊中启用天气查询",
     "type": "bool",
     "default": true
+  },
+  "ranking_api_url": {
+    "description": "管理员消费排行 API 的完整 URL",
+    "hint": "例如：http://127.0.0.1:8080/api/v1/admin/dashboard/users-ranking",
+    "type": "string",
+    "default": "http://127.0.0.1:8080/api/v1/admin/dashboard/users-ranking"
+  },
+  "ranking_api_key": {
+    "description": "管理员 API Key",
+    "hint": "请求消费排行 API 时通过 x-api-key 请求头发送。",
+    "type": "string",
+    "default": ""
   }
 }
